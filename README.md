@@ -24,7 +24,8 @@ mvn clean
 sbt package
 
 // To run spark locally
-spark-submit --class net.sansa_stack.template.spark.rdf.Algorithm --master local ./target/scala-2.11/sansa-template-maven-spark_2.11-0.1.jar
+spark-submit --class net.sansa_stack.template.spark.rdf.Algorithm 
+             --master local ./target/scala-2.11/sansa-template-maven-spark_2.11-0.1.jar
 ````
 
 The subsequent steps depend on your IDE. Generally, just import this repository as a Maven project and start using SANSA / Spark. Enjoy it! :)
