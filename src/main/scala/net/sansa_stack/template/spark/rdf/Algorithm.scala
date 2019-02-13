@@ -33,27 +33,20 @@ object Algorithm {
     val resourcePath = "src/main/resources/dataset.csv"
     val df = spark.read.format("csv").option("header", "true").load(resourcePath)
 
+    val featureVectors = generateFeatureVectors(spark, df)
+    val sampleSize = 10
+    val sample = randomSample(featureVectors, sampleSize)
+    sample.show()
+    println(s"Sample Count ${sample.count()}")
+    val authorsGamma = calculateGamma(sample, "Author")
+    val titlesGamma = calculateGamma(sample, columnName = "Title")
+    val venueGamma = calculateGamma(sample, columnName = "Venue")
+    val reviewGamma = calculateGamma(sample, columnName = "Review")
 
-    df.show()
-//
-//    val authors = df.select("Author").distinct()
-//    val titles = df.select("Title").distinct()
-//    val venues = df.select("Venue").distinct()
-//    val ratings = df.select("Rating").distinct()
-//
-//    print("Distinct Authors")
-//    print(authors.show())
-//    print("Distinct Titles")
-//    print(titles.show())
-//    print("Distinct Venues")
-//    print(venues.show())
-//    print("Distinct Ratings")
-//    print(ratings.show())
-//
-//    val result = RefinedSoundexMetric.compare("robert", "rupert") // true
-//    RefinedSoundexMetric.compare("robert", "rubin") // false
-
-    val featureVector = generateFeatureVectors(spark, df)
+    println(s"Author Gamma ${authorsGamma}")
+    println(s"Titles Gamma ${titlesGamma}")
+    println(s"Venues Gamma ${venueGamma}")
+    println(s"Reviews Gamma ${reviewGamma}")
 
     spark.stop
   }
@@ -130,6 +123,33 @@ object Algorithm {
 
     return featureVectorWithoutTupleColumn.toDF()
   }
+
+  def randomSample(dataFrame: DataFrame, size: Int): DataFrame = {
+    val sample = dataFrame.sample(false, 0.1, size)
+
+    return sample
+  }
+
+  def calculateGamma(sample: DataFrame, columnName: String): Float = {
+    val column = sample.select(columnName)
+    val count = column.count().toInt
+
+    val numberOf0 = column.filter { row =>
+      val value = row.getInt(0)
+      value.equals(0)
+    }.count()
+
+    val numberOf1 = column.filter { row =>
+      val value = row.getInt(0)
+      value.equals(1)
+    }.count()
+
+    val gamma: Float = ((numberOf1 - numberOf0).toFloat / count)
+
+    return gamma
+  }
+
+
 
 //  case class Config(in: String = "")
 //
