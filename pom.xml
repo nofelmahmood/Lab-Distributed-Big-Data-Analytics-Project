@@ -102,6 +102,13 @@
 			<version>${sansa.ml.version}</version>
 		</dependency>
 
+		<!-- https://mvnrepository.com/artifact/com.rockymadden.stringmetric/stringmetric-core -->
+		<dependency>
+			<groupId>com.rockymadden.stringmetric</groupId>
+			<artifactId>stringmetric-core</artifactId>
+			<version>0.25.3</version>
+		</dependency>
+
 		<!-- Test -->
 		<dependency>
 			<groupId>junit</groupId>
