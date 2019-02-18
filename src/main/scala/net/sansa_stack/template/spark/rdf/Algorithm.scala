@@ -1,11 +1,16 @@
 package net.sansa_stack.template.spark.rdf
 
+import net.sansa_stack.template.spark.rdf._
+
 import scala.Predef._
 import org.apache.spark.SparkContext._
 import org.apache.spark.sql._
+import org.apache.spark.sql.functions._
 import com.rockymadden.stringmetric.phonetic.RefinedSoundexMetric
+import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.types._
 import org.datasyslab.geosparksql.utils.DataFrameFactory
+
 
 object Algorithm {
 
@@ -17,6 +22,12 @@ object Algorithm {
 
   def main(args: Array[String]): Unit = {
     run("dataset.csv")
+
+//    val scheme = "(((1&0)|1)|0))"
+//    val result = BlockingSchemeCalculator.calculate(scheme)
+//    println(s"Result ${result}")
+
+
 //    parser.parse(args, Config()) match {
 //      case Some(config) =>
 //        run(config.in)
@@ -37,32 +48,256 @@ object Algorithm {
 
     val featureVectors = generateFeatureVectors(spark, df)
 
-    val sampleSize = 20
-    val sample = randomSample(featureVectors, sampleSize)
+    var n: Long = 0
+    val budget = 100
+    var S = featureVectors.columns
 
-    val authorsGamma = calculateGamma(sample, "Author")
-    val titlesGamma = calculateGamma(sample, columnName = "Title")
-    val venueGamma = calculateGamma(sample, columnName = "Venue")
-    val reviewGamma = calculateGamma(sample, columnName = "Review")
+    val sampleSize = 30
+    var X = randomSample(featureVectors, sampleSize)
 
-    val authorsDeficient = authorsGamma * sample.count()
-    val titlesDeficient = titlesGamma * sample.count()
-    val venueDeficient = venueGamma * sample.count()
-    val reviewDeficient = reviewGamma * sample.count()
+    var trainingSet = spark.emptyDataFrame
 
-    val featureVectorsExceptSample = featureVectors.exceptAll(sample)
-    println(s"Feature Vectors count ${featureVectors.count()}")
-    println(s"Sample Count ${sample.count()}")
-    println(s"Feature Vectors Except Sample ${featureVectorsExceptSample.count()}")
+    while (n < budget) {
 
-    // Add similar or dissimilar samples
-    addSample(sample, featureVectorsExceptSample,
-      "Author",
-      authorsDeficient.toInt,
-      authorsDeficient <= 0)
+      S.foreach { scheme =>
+        val featureVectorsExceptSample = featureVectors.exceptAll(X)
+        val gamma = calculateGamma(X, scheme)
+        val deficiency = (gamma * X.count()).toInt
 
+        X = addSample(X, featureVectorsExceptSample,
+                        scheme, deficiency, gamma <=0)
+
+        n = X.count()
+      }
+
+      println(s"N ${n}")
+
+      trainingSet = humanOracle(spark, X)
+
+      val trainingSetColumnNames = trainingSet.columns
+
+      var schemeErrorRates = S.map { s => spark.sparkContext.doubleAccumulator }
+      var errorRateThreshold = 0.5
+
+      trainingSet.foreach { row =>
+        val humanOracle = row.getString(row.length - 1)
+        var schemes = S.clone()
+
+        for (i <- 0 to row.length - 2) {
+          val columnName = trainingSetColumnNames(i)
+          val value = row.getInt(i)
+
+          schemes = schemes.map { scheme =>
+            scheme.replaceAll(columnName, value.toString)
+          }
+        }
+
+        val schemeResults = schemes.map { scheme =>
+          BlockingSchemeCalculator.calculate(scheme)
+        }
+
+        for (i <- 0 to schemeResults.length - 1) {
+          val result = schemeResults(i)
+
+          if ((result && humanOracle == "N") || (!result && humanOracle == "M")) {
+            schemeErrorRates(i).add(1)
+          }
+        }
+      }
+
+      val finalErrorRates = schemeErrorRates.map { error =>
+        error.value / trainingSet.count()
+      }
+
+      var minIndex = 0
+      var min: Double = finalErrorRates(0)
+
+      for (i <- 0 to finalErrorRates.length - 1) {
+        val value = finalErrorRates(i)
+        if (value < min) {
+          minIndex = i
+          min = value
+        }
+      }
+
+      val optimalScheme = S(minIndex)
+      val sPrevious = S.clone()
+      S = Array[String]()
+
+      if (min <= errorRateThreshold) {
+        val optimumFP = falsePositives(spark, optimalScheme, trainingSet)
+
+        for (i <- 0 to sPrevious.length - 1) {
+          val scheme = sPrevious(i)
+          val newSchemes = generateBlockingSchemes(Array(scheme), optimalScheme, "and")
+
+          if (!newSchemes.isEmpty) {
+            val andScheme = newSchemes(0)
+
+            val fp = falsePositives(spark, scheme, trainingSet)
+
+            val andSchemeFP = falsePositives(spark, andScheme, trainingSet)
+
+            if ((optimumFP >= andSchemeFP) && fp >= andSchemeFP) {
+              S = S :+ andScheme
+            } else {
+              S = S :+ scheme
+            }
+          }
+        }
+
+      } else {
+
+        val optimalFN = falseNegatives(spark, optimalScheme, trainingSet)
+        val optimalTP = truePositives(spark, optimalScheme, trainingSet)
+
+        for (i <- 0 to sPrevious.length - 1) {
+          val scheme = sPrevious(i)
+          val fn = falseNegatives(spark, scheme, trainingSet)
+          val tp = truePositives(spark, scheme, trainingSet)
+
+          val newSchemes = generateBlockingSchemes(Array(scheme), optimalScheme, "or")
+
+          if (!newSchemes.isEmpty) {
+            val orScheme = newSchemes(0)
+            val orSchemeFN = falseNegatives(spark, orScheme, trainingSet)
+            val orSchemeTP = truePositives(spark, orScheme, trainingSet)
+
+            if (((optimalFN/optimalTP) >= (orSchemeFN/orSchemeTP)) && ((fn/tp) >= (orSchemeFN/orSchemeTP))) {
+              S = S :+ orScheme
+            } else {
+              S = S :+ scheme
+            }
+          }
+        }
+      }
+    }
+
+    println("Schemes")
+    S.foreach(println)
 
     spark.stop
+  }
+
+
+  def falsePositives(spark: SparkSession, scheme: String, trainingSet: DataFrame): Long = {
+
+    val count = spark.sparkContext.longAccumulator
+    val columnNames = trainingSet.columns
+
+    trainingSet.foreach { row =>
+      val humanOracle = row.getString(row.length - 1)
+      var currentScheme = scheme
+
+      for (i <- 0 to row.length - 2) {
+        val columnName = columnNames(i)
+        val value = row.getInt(i)
+
+        currentScheme = currentScheme.replaceAll(columnName, value.toString)
+      }
+
+      currentScheme = currentScheme.replaceAll(" and ", "&")
+      currentScheme = currentScheme.replaceAll(" or ", "|")
+
+      val result = BlockingSchemeCalculator.calculate(currentScheme)
+
+      if (result && humanOracle == "N") {
+        count.add(1)
+      }
+    }
+
+    return count.value
+  }
+
+  def falseNegatives(spark: SparkSession, scheme: String, trainingSet: DataFrame): Long = {
+
+    val count = spark.sparkContext.longAccumulator
+    val columnNames = trainingSet.columns
+
+    trainingSet.foreach { row =>
+      val humanOracle = row.getString(row.length - 1)
+      var currentScheme = scheme
+
+      for (i <- 0 to row.length - 2) {
+        val columnName = columnNames(i)
+        val value = row.getInt(i)
+
+        currentScheme = currentScheme.replaceAll(columnName, value.toString)
+      }
+
+      currentScheme = currentScheme.replaceAll(" and ", "&")
+      currentScheme = currentScheme.replaceAll(" or ", "|")
+
+      val result = BlockingSchemeCalculator.calculate(currentScheme)
+
+      if (!result && humanOracle == "M") {
+        count.add(1)
+      }
+    }
+
+    return count.value
+  }
+
+  def truePositives(spark: SparkSession, scheme: String, trainingSet: DataFrame): Long = {
+
+    val count = spark.sparkContext.longAccumulator
+    val columnNames = trainingSet.columns
+
+    trainingSet.foreach { row =>
+      val humanOracle = row.getString(row.length - 1)
+      var currentScheme = scheme
+
+      for (i <- 0 to row.length - 2) {
+        val columnName = columnNames(i)
+        val value = row.getInt(i)
+
+        currentScheme = currentScheme.replaceAll(columnName, value.toString)
+      }
+
+      currentScheme = currentScheme.replaceAll(" and ", "&")
+      currentScheme = currentScheme.replaceAll(" or ", "|")
+
+      val result = BlockingSchemeCalculator.calculate(currentScheme)
+
+      if (result && humanOracle == "M") {
+        count.add(1)
+      }
+    }
+
+    return count.value
+  }
+
+  def humanOracle(spark: SparkSession, sampleFeatureVectors: DataFrame): DataFrame = {
+
+    val newSample = sampleFeatureVectors.withColumn("Label", lit("M"))
+
+    val rdd = newSample.rdd.map { row =>
+      val valuesArray = row.toSeq.toArray
+
+      var numberOf1 = 0
+      val total = row.length - 2
+
+      for (i <- 0 to total) {
+        val value = row.getInt(i)
+
+        if (value == 1) {
+          numberOf1 = numberOf1 + 1
+        }
+      }
+
+      val totalFeatures = row.length - 1
+      val percentage: Float = (numberOf1.toFloat/totalFeatures.toFloat) * 100
+      var result = "N"
+      if (percentage >= 75) {
+        result = "M"
+      }
+
+      valuesArray(row.length - 1) = result
+
+      Row.fromSeq(valuesArray.toSeq)
+    }
+
+    spark.createDataFrame(rdd, newSample.schema)
   }
 
   def generateFeatureVectors(spark: SparkSession, dataframe: DataFrame): DataFrame = {
@@ -127,8 +362,6 @@ object Algorithm {
     val columnNames = Seq("Author", "Title", "Venue", "Review")
     val featureVectorWithoutTupleColumn = featureVectors.toDF().select(columnNames.head, columnNames.tail: _*)
 
-    featureVectorWithoutTupleColumn.show()
-
     return featureVectorWithoutTupleColumn.toDF()
   }
 
@@ -136,79 +369,77 @@ object Algorithm {
     val sample = dataFrame.sample(false, 1D*size/dataFrame.count)
     return sample
   }
-  
-  def calculateGamma(sample: DataFrame, columnName: String): Float = {
-    val column = sample.select(columnName)
-    val count = column.count().toInt
 
-    val numberOf0 = column.filter { row =>
-      val value = row.getInt(0)
-      value.equals(0)
-    }.count()
+  def calculateGamma(sample: DataFrame, blockingScheme: String): Float = {
 
-    val numberOf1 = column.filter { row =>
-      val value = row.getInt(0)
-      value.equals(1)
-    }.count()
+    val columnNames = sample.columns
+    val satisfyingRows = sample.filter { row =>
+      var scheme = blockingScheme
 
-    val gamma: Float = ((numberOf1 - numberOf0).toFloat / count)
+      for (i <- 0 to columnNames.length - 1) {
+        val columnName = columnNames(i)
+        val value = row.getInt(i)
+
+        scheme = scheme.replaceAll(columnName, value.toString)
+      }
+
+      BlockingSchemeCalculator.calculate(scheme)
+    }
+
+    val notSatisfyingRows = sample.exceptAll(satisfyingRows)
+    println(s"Scheme ${blockingScheme} Satisfy ${satisfyingRows.count()} Not Satisfy ${notSatisfyingRows.count()}")
+    val gamma: Float = ((satisfyingRows.count() - notSatisfyingRows.count()).toFloat / sample.count())
 
     return gamma
   }
 
-  def satisfiesBlockingScheme(featureVector: Row,
-                              columnIndexes: Array[Int],
-                              conjunctionsAndDisjunctions: Array[Boolean]): Boolean = {
-
-    val firstColumnIndex = columnIndexes(0)
-    var result = featureVector.getInt(firstColumnIndex) == 1
-
-    for (index <- 0 to (conjunctionsAndDisjunctions.length - 1)) {
-
-      val columnIndex = columnIndexes(index + 1)
-      val featureValue = featureVector.getInt(columnIndex) == 1
-      val condition = conjunctionsAndDisjunctions(index)
-
-      // Condition == true means and
-      // Condition == false means or
-
-      if (condition) {
-        result = result && featureValue
-      } else {
-        result = result || featureValue
-      }
-    }
-
-    return result
-  }
-
-  def addSample(sampleDataframe: DataFrame,
-                dataframe: DataFrame,
-                columnName: String,
+  def addSample(sampleFeatureVectors: DataFrame,
+                featureVectorsExceptSample: DataFrame,
+                blockingScheme: String,
                 deficiency: Int,
-                similar: Boolean): Unit = {
-
-    val column = dataframe.select(columnName)
+                similar: Boolean): DataFrame = {
 
 
+    val columnNames = featureVectorsExceptSample.columns
 
-    if (similar) {
-      var selectedRows: Vector[FeatureVector] = Vector()
+    val filteredRows = featureVectorsExceptSample.filter { row =>
+      var scheme = blockingScheme
 
-      dataframe.foreach { row =>
-        val author = row.getInt(0)
-        println(s"Author ${author}")
+      for (i <- 0 to columnNames.length - 1) {
+        val columnName = columnNames(i)
+        val value = row.getInt(i)
 
+        scheme = scheme.replaceAll(columnName, value.toString)
       }
 
-    } else {
-
-      for (i <- 0 to deficiency) {
-
+      if (similar) {
+        BlockingSchemeCalculator.calculate(scheme)
+      } else {
+        !BlockingSchemeCalculator.calculate(scheme)
       }
     }
+
+    val newRows = filteredRows.limit(math.abs(deficiency))
+    println(s"Deficient ${math.abs(deficiency)}")
+    println(s"New ROWS ${newRows.count()}")
+
+    return sampleFeatureVectors.union(newRows)
   }
 
+  def generateBlockingSchemes(schemes: Array[String],
+                              optimumScheme: String,
+                              condition: String): Array[String] = {
+
+    val schemesExceptOptimum = schemes.filter { scheme =>
+      scheme != optimumScheme
+    }
+
+    val newSchemes = schemesExceptOptimum.map { scheme =>
+      s"(${scheme} ${condition} ${optimumScheme})"
+    }
+
+    return newSchemes
+  }
 
 //  case class Config(in: String = "")
 //
