@@ -49,13 +49,16 @@ object Algorithm {
     val featureVectors = generateFeatureVectors(spark, df)
 
     var n: Long = 0
-    val budget = 100
+    val budget = 70
     var S = featureVectors.columns
+    var optimalScheme = S(0)
 
-    val sampleSize = 30
+    val sampleSize = 15
     var X = randomSample(featureVectors, sampleSize)
 
     var trainingSet = spark.emptyDataFrame
+
+    var constraintSatisfactionNs: Long = 0
 
     while (n < budget) {
 
@@ -70,14 +73,12 @@ object Algorithm {
         n = X.count()
       }
 
-      println(s"N ${n}")
-
       trainingSet = humanOracle(spark, X)
 
       val trainingSetColumnNames = trainingSet.columns
 
       var schemeErrorRates = S.map { s => spark.sparkContext.doubleAccumulator }
-      var errorRateThreshold = 0.5
+      var errorRateThreshold = 0.4
 
       trainingSet.foreach { row =>
         val humanOracle = row.getString(row.length - 1)
@@ -120,11 +121,14 @@ object Algorithm {
         }
       }
 
-      val optimalScheme = S(minIndex)
+      optimalScheme = S(minIndex)
+
       val sPrevious = S.clone()
       S = Array[String]()
 
       if (min <= errorRateThreshold) {
+
+        constraintSatisfactionNs = n
         val optimumFP = falsePositives(spark, optimalScheme, trainingSet)
 
         for (i <- 0 to sPrevious.length - 1) {
@@ -173,12 +177,111 @@ object Algorithm {
       }
     }
 
-    println("Schemes")
-    S.foreach(println)
+    println("Results")
+    val reductionRatio = calculateReductionRatio(trainingSet, optimalScheme)
+    val completness = pairCompleteness(trainingSet, optimalScheme)
+    val quality = pairQuality(trainingSet, optimalScheme)
+    val fmeas = fMeasure(completness, quality)
+    val cSatisfaction = constraintSatisfaction(constraintSatisfactionNs, n)
+
+    println(s"Reduction Ration ${reductionRatio}")
+    println(s"Pair Completeness ${completness}")
+    println(s"Pair Quality ${quality}")
+    println(s"F Measure ${fmeas}")
+    println(s"Constraint Satisfaction ${cSatisfaction}")
 
     spark.stop
   }
 
+  def constraintSatisfaction(ns: Long, n: Long): Float = {
+    return ns/n
+  }
+
+  def calculateReductionRatio(trainingSet: DataFrame, optimalScheme: String): Float = {
+
+    val columnNames = trainingSet.columns
+
+    val satisfyingRows = trainingSet.filter { row =>
+      var scheme = optimalScheme
+
+      for (i <- 0 to columnNames.length - 2) {
+        val columnName = columnNames(i)
+        val value = row.getInt(i)
+
+        scheme = scheme.replaceAll(columnName, value.toString)
+      }
+
+      BlockingSchemeCalculator.calculate(scheme)
+    }
+
+    val notSatisfyingRows = trainingSet.exceptAll(satisfyingRows)
+
+    return 1 - (satisfyingRows.count()/notSatisfyingRows.count())
+  }
+
+  def pairCompleteness(trainingSet: DataFrame, optimalScheme: String): Float = {
+
+    val columnNames = trainingSet.columns
+
+    val satisfyingRows = trainingSet.filter { row =>
+      var scheme = optimalScheme
+      val humanOracle = row.getString(row.length - 1)
+
+      for (i <- 0 to columnNames.length - 2) {
+        val columnName = columnNames(i)
+        val value = row.getInt(i)
+
+        scheme = scheme.replaceAll(columnName, value.toString)
+      }
+
+      BlockingSchemeCalculator.calculate(scheme) && humanOracle == "M"
+    }
+
+    val matchedRows = trainingSet.filter { row =>
+      val humanOracle = row.getString(row.length - 1)
+      humanOracle == "M"
+    }
+
+    return satisfyingRows.count()/matchedRows.count()
+  }
+
+  def pairQuality(trainingSet: DataFrame, optimalScheme: String): Float = {
+
+    val columnNames = trainingSet.columns
+
+    val satisfyingRows = trainingSet.filter { row =>
+      var scheme = optimalScheme
+      val humanOracle = row.getString(row.length - 1)
+
+      for (i <- 0 to columnNames.length - 2) {
+        val columnName = columnNames(i)
+        val value = row.getInt(i)
+
+        scheme = scheme.replaceAll(columnName, value.toString)
+      }
+
+      BlockingSchemeCalculator.calculate(scheme) && humanOracle == "M"
+    }
+
+    val schemeSatisfyRows = trainingSet.filter { row =>
+      var scheme = optimalScheme
+
+      for (i <- 0 to columnNames.length - 2) {
+        val columnName = columnNames(i)
+        val value = row.getInt(i)
+
+        scheme = scheme.replaceAll(columnName, value.toString)
+      }
+
+      BlockingSchemeCalculator.calculate(scheme)
+    }
+
+    return satisfyingRows.count()/schemeSatisfyRows.count()
+  }
+
+  def fMeasure(pairCompleteness: Float, pairQuality: Float): Float = {
+    return (2 * pairCompleteness * pairQuality)/(pairQuality + pairCompleteness)
+  }
 
   def falsePositives(spark: SparkSession, scheme: String, trainingSet: DataFrame): Long = {
 
@@ -387,7 +490,6 @@ object Algorithm {
     }
 
     val notSatisfyingRows = sample.exceptAll(satisfyingRows)
-    println(s"Scheme ${blockingScheme} Satisfy ${satisfyingRows.count()} Not Satisfy ${notSatisfyingRows.count()}")
     val gamma: Float = ((satisfyingRows.count() - notSatisfyingRows.count()).toFloat / sample.count())
 
     return gamma
@@ -420,8 +522,6 @@ object Algorithm {
     }
 
     val newRows = filteredRows.limit(math.abs(deficiency))
-    println(s"Deficient ${math.abs(deficiency)}")
-    println(s"New ROWS ${newRows.count()}")
 
     return sampleFeatureVectors.union(newRows)
   }
