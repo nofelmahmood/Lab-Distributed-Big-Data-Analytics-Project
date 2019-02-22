@@ -4,10 +4,20 @@ import org.apache.spark.sql.DataFrame
 
 object Experiments {
 
+  /** Calculates Constraint Satisfaction.
+    *
+    *  @param ns n when the condition became true.
+    *  @param n Final n.
+    */
   def constraintSatisfaction(ns: Long, n: Long): Float = {
     return ns/n
   }
 
+  /** Calculates Reduction Ratio.
+    *
+    *  @param trainingSet training set dataframe.
+    *  @param optimalScheme optimal scheme returned by the main algorithm.
+    */
   def reductionRatio(trainingSet: DataFrame, optimalScheme: String): Float = {
 
     val columnNames = trainingSet.columns
@@ -30,6 +40,11 @@ object Experiments {
     return 1.toFloat - (satisfyingRows.count().toFloat/notSatisfyingRows.count().toFloat)
   }
 
+  /** Calculates Pair Completeness.
+    *
+    *  @param trainingSet training set dataframe.
+    *  @param optimalScheme optimal scheme returned by the main algorithm.
+    */
   def pairCompleteness(trainingSet: DataFrame, optimalScheme: String): Float = {
 
     val columnNames = trainingSet.columns
@@ -56,6 +71,11 @@ object Experiments {
     return satisfyingRows.count().toFloat/matchedRows.count().toFloat
   }
 
+  /** Calculates Pair Quality.
+    *
+    *  @param trainingSet training set dataframe.
+    *  @param optimalScheme optimal scheme returned by the main algorithm.
+    */
   def pairQuality(trainingSet: DataFrame, optimalScheme: String): Float = {
 
     val columnNames = trainingSet.columns
@@ -90,6 +110,11 @@ object Experiments {
     return satisfyingRows.count().toFloat/schemeSatisfyRows.count().toFloat
   }
 
+  /** Calculates F Measure.
+    *
+    *  @param pairCompleteness pair completeness calculated using above method.
+    *  @param pairQuality pair quality calculated using about method.
+    */
   def fMeasure(pairCompleteness: Float, pairQuality: Float): Float = {
     return (2 * pairCompleteness * pairQuality)/(pairQuality + pairCompleteness)
   }

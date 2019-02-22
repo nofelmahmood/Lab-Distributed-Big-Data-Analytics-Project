@@ -4,6 +4,10 @@ import scala.collection.mutable
 
 object BlockingSchemeCalculator {
 
+  /** Calculates Blocking Scheme value (true or false) for a given feature vector.
+    *
+    *  @param scheme blocking scheme.
+    */
   def calculate(scheme: String): Boolean = {
 
     var finalScheme = scheme.replaceAll(" and ", "&")
@@ -43,7 +47,6 @@ object BlockingSchemeCalculator {
     } else {
       return false
     }
-
   }
 }
 
