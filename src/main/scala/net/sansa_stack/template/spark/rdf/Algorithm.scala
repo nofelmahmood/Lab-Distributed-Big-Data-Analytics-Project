@@ -23,11 +23,6 @@ object Algorithm {
   def main(args: Array[String]): Unit = {
     run("dataset.csv")
 
-//    val scheme = "(((1&0)|1)|0))"
-//    val result = BlockingSchemeCalculator.calculate(scheme)
-//    println(s"Result ${result}")
-
-
 //    parser.parse(args, Config()) match {
 //      case Some(config) =>
 //        run(config.in)
@@ -49,18 +44,22 @@ object Algorithm {
     val featureVectors = generateFeatureVectors(spark, df)
 
     var n: Long = 0
-    val budget = 70
-    var S = featureVectors.columns
-    var optimalScheme = S(0)
+    var oldN: Long = 0
+    var stop = false
 
-    val sampleSize = 15
+    val budget = 170
+    var S = featureVectors.columns
+    var optimalScheme = ""
+    var errorRateThreshold = 0.3
+
+    val sampleSize = 45
     var X = randomSample(featureVectors, sampleSize)
 
     var trainingSet = spark.emptyDataFrame
 
     var constraintSatisfactionNs: Long = 0
 
-    while (n < budget) {
+    while (n < budget && !stop) {
 
       S.foreach { scheme =>
         val featureVectorsExceptSample = featureVectors.exceptAll(X)
@@ -73,12 +72,16 @@ object Algorithm {
         n = X.count()
       }
 
+      if (n == oldN) {
+        stop = true
+      }
+      oldN = n
+
       trainingSet = humanOracle(spark, X)
 
       val trainingSetColumnNames = trainingSet.columns
 
       var schemeErrorRates = S.map { s => spark.sparkContext.doubleAccumulator }
-      var errorRateThreshold = 0.4
 
       trainingSet.foreach { row =>
         val humanOracle = row.getString(row.length - 1)
@@ -177,6 +180,7 @@ object Algorithm {
       }
     }
 
+    println(s"Optimal Scheme ${optimalScheme}")
     println("Results")
     val reductionRatio = calculateReductionRatio(trainingSet, optimalScheme)
     val completness = pairCompleteness(trainingSet, optimalScheme)
@@ -184,7 +188,12 @@ object Algorithm {
     val fmeas = fMeasure(completness, quality)
     val cSatisfaction = constraintSatisfaction(constraintSatisfactionNs, n)
 
-    println(s"Reduction Ration ${reductionRatio}")
+    println(s"Budget ${budget}")
+    println("Human Oracle Percentage 100%")
+    println(s"Initial Sample Size ${sampleSize}")
+    println(s"Sample Size ${trainingSet.count()}")
+    println(s"Error Rate Threshold ${errorRateThreshold}")
+    println(s"Reduction Ratio ${reductionRatio}")
     println(s"Pair Completeness ${completness}")
     println(s"Pair Quality ${quality}")
     println(s"F Measure ${fmeas}")
@@ -192,6 +201,7 @@ object Algorithm {
 
     spark.stop
   }
+
 
   def constraintSatisfaction(ns: Long, n: Long): Float = {
     return ns/n
@@ -216,7 +226,7 @@ object Algorithm {
 
     val notSatisfyingRows = trainingSet.exceptAll(satisfyingRows)
 
-    return 1 - (satisfyingRows.count()/notSatisfyingRows.count())
+    return 1.toFloat - (satisfyingRows.count().toFloat/notSatisfyingRows.count().toFloat)
   }
 
   def pairCompleteness(trainingSet: DataFrame, optimalScheme: String): Float = {
@@ -242,7 +252,7 @@ object Algorithm {
       humanOracle == "M"
     }
 
-    return satisfyingRows.count()/matchedRows.count()
+    return satisfyingRows.count().toFloat/matchedRows.count().toFloat
   }
 
   def pairQuality(trainingSet: DataFrame, optimalScheme: String): Float = {
@@ -276,7 +286,7 @@ object Algorithm {
       BlockingSchemeCalculator.calculate(scheme)
     }
 
-    return satisfyingRows.count()/schemeSatisfyRows.count()
+    return satisfyingRows.count().toFloat/schemeSatisfyRows.count().toFloat
   }
 
   def fMeasure(pairCompleteness: Float, pairQuality: Float): Float = {
@@ -391,7 +401,7 @@ object Algorithm {
       val totalFeatures = row.length - 1
       val percentage: Float = (numberOf1.toFloat/totalFeatures.toFloat) * 100
       var result = "N"
-      if (percentage >= 75) {
+      if (percentage >= 100) {
         result = "M"
       }
 
