@@ -17,7 +17,6 @@ r15,Rudy,Mining,CLL,Good
 r16,Clara,Deep,KDD,Excellent
 r17,Becker,Learning,CIKM,Satisfactory
 r18,Clara,Deep,kdd,Ecellent
-<<<<<<< HEAD
 r19,Andrew,Deep,KDD,exellent
 r20,Andrew,Mining,KDD,Good
 r21,Clara,Deep,kdd,Ecellent
@@ -28,6 +27,3 @@ r25,Robert,Mining,CLL,Good
 r26,Becker,Fast,cikm,excellent
 r27,Robrt,Learning,KDDA,good
 r28,Gale,Learning,AKDD,Satisfactory
-=======
-r19,Andrew,Deep,KDD,exellent
->>>>>>> 1b3e552f3cf36389e0725cad8fb4c4447580f76d
