@@ -32,7 +32,6 @@ object Algorithm {
     val df = spark.read.format("csv").option("header", "true").load(input)
 
     val featureVectors = generateFeatureVectors(spark, df)
-    featureVectors.show()
 
     algorithm(spark, featureVectors)
 
