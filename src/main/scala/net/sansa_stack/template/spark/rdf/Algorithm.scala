@@ -1,56 +1,61 @@
 package net.sansa_stack.template.spark.rdf
 
-import net.sansa_stack.template.spark.rdf._
-
 import scala.Predef._
-import org.apache.spark.SparkContext._
 import org.apache.spark.sql._
 import org.apache.spark.sql.functions._
 import com.rockymadden.stringmetric.phonetic.RefinedSoundexMetric
-import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.types._
-import org.datasyslab.geosparksql.utils.DataFrameFactory
 
 
 object Algorithm {
 
-  case class FeatureVector(Tuple: String,
-                           Author: Integer,
-                           Title: Integer,
-                           Venue: Integer,
-                           Review: Integer)
-
   def main(args: Array[String]): Unit = {
-    run("dataset.csv")
 
-//    parser.parse(args, Config()) match {
-//      case Some(config) =>
-//        run(config.in)
-//      case None =>
-//        println(parser.usage)
-//    }
+    // Pass the dataset file as input argument
+    // -i "src/main/resources/dataset.csv"
+
+    parser.parse(args, Config()) match {
+      case Some(config) =>
+        run(config.in)
+      case None =>
+        println(parser.usage)
+    }
   }
 
   def run(input: String): Unit = {
 
     val spark = SparkSession.builder
-        .master("local[*]")
-      .appName(s"Spark CSV Reader")
+      .master("local[*]")
+      .appName(s"Active Blocking Scheme Learning For Entity Resolution")
       .getOrCreate()
 
-    val resourcePath = "src/main/resources/dataset.csv"
-    val df = spark.read.format("csv").option("header", "true").load(resourcePath)
+    val df = spark.read.format("csv").option("header", "true").load(input)
 
     val featureVectors = generateFeatureVectors(spark, df)
+    featureVectors.show()
+
+    algorithm(spark, featureVectors)
+
+    spark.stop
+  }
+
+  // Returns optimal scheme
+  /** Runs the main algorithm and prints the experimental results.
+    *
+    *  @param spark the spark session object.
+    *  @param featureVectors set of feature vectors.
+    */
+  def algorithm(spark: SparkSession, featureVectors: DataFrame): String = {
 
     var n: Long = 0
     var oldN: Long = 0
     var stop = false
 
+    val humanOracleThresholdPercentage = 75
     val budget = 170
     var S = featureVectors.columns
     var optimalScheme = ""
-    var errorRateThreshold = 0.3
+    val errorRateThreshold = 0.3
 
     val sampleSize = 45
     var X = randomSample(featureVectors, sampleSize)
@@ -67,7 +72,7 @@ object Algorithm {
         val deficiency = (gamma * X.count()).toInt
 
         X = addSample(X, featureVectorsExceptSample,
-                        scheme, deficiency, gamma <=0)
+          scheme, deficiency, gamma <=0)
 
         n = X.count()
       }
@@ -77,11 +82,11 @@ object Algorithm {
       }
       oldN = n
 
-      trainingSet = humanOracle(spark, X)
+      trainingSet = humanOracle(spark, X, humanOracleThresholdPercentage)
 
       val trainingSetColumnNames = trainingSet.columns
 
-      var schemeErrorRates = S.map { s => spark.sparkContext.doubleAccumulator }
+      val schemeErrorRates = S.map { s => spark.sparkContext.doubleAccumulator }
 
       trainingSet.foreach { row =>
         val humanOracle = row.getString(row.length - 1)
@@ -181,15 +186,16 @@ object Algorithm {
     }
 
     println(s"Optimal Scheme ${optimalScheme}")
-    println("Results")
-    val reductionRatio = calculateReductionRatio(trainingSet, optimalScheme)
-    val completness = pairCompleteness(trainingSet, optimalScheme)
-    val quality = pairQuality(trainingSet, optimalScheme)
-    val fmeas = fMeasure(completness, quality)
-    val cSatisfaction = constraintSatisfaction(constraintSatisfactionNs, n)
+    val reductionRatio = Experiments.reductionRatio(trainingSet, optimalScheme)
+    val completness = Experiments.pairCompleteness(trainingSet, optimalScheme)
+    val quality = Experiments.pairQuality(trainingSet, optimalScheme)
+    val fmeas = Experiments.fMeasure(completness, quality)
+    val cSatisfaction = Experiments.constraintSatisfaction(constraintSatisfactionNs, n)
+
+    println("*** Results ***")
 
     println(s"Budget ${budget}")
-    println("Human Oracle Percentage 100%")
+    println(s"Human Oracle Percentage ${humanOracleThresholdPercentage}")
     println(s"Initial Sample Size ${sampleSize}")
     println(s"Sample Size ${trainingSet.count()}")
     println(s"Error Rate Threshold ${errorRateThreshold}")
@@ -199,100 +205,15 @@ object Algorithm {
     println(s"F Measure ${fmeas}")
     println(s"Constraint Satisfaction ${cSatisfaction}")
 
-    spark.stop
+    return optimalScheme
   }
 
-
-  def constraintSatisfaction(ns: Long, n: Long): Float = {
-    return ns/n
-  }
-
-  def calculateReductionRatio(trainingSet: DataFrame, optimalScheme: String): Float = {
-
-    val columnNames = trainingSet.columns
-
-    val satisfyingRows = trainingSet.filter { row =>
-      var scheme = optimalScheme
-
-      for (i <- 0 to columnNames.length - 2) {
-        val columnName = columnNames(i)
-        val value = row.getInt(i)
-
-        scheme = scheme.replaceAll(columnName, value.toString)
-      }
-
-      BlockingSchemeCalculator.calculate(scheme)
-    }
-
-    val notSatisfyingRows = trainingSet.exceptAll(satisfyingRows)
-
-    return 1.toFloat - (satisfyingRows.count().toFloat/notSatisfyingRows.count().toFloat)
-  }
-
-  def pairCompleteness(trainingSet: DataFrame, optimalScheme: String): Float = {
-
-    val columnNames = trainingSet.columns
-
-    val satisfyingRows = trainingSet.filter { row =>
-      var scheme = optimalScheme
-      val humanOracle = row.getString(row.length - 1)
-
-      for (i <- 0 to columnNames.length - 2) {
-        val columnName = columnNames(i)
-        val value = row.getInt(i)
-
-        scheme = scheme.replaceAll(columnName, value.toString)
-      }
-
-      BlockingSchemeCalculator.calculate(scheme) && humanOracle == "M"
-    }
-
-    val matchedRows = trainingSet.filter { row =>
-      val humanOracle = row.getString(row.length - 1)
-      humanOracle == "M"
-    }
-
-    return satisfyingRows.count().toFloat/matchedRows.count().toFloat
-  }
-
-  def pairQuality(trainingSet: DataFrame, optimalScheme: String): Float = {
-
-    val columnNames = trainingSet.columns
-
-    val satisfyingRows = trainingSet.filter { row =>
-      var scheme = optimalScheme
-      val humanOracle = row.getString(row.length - 1)
-
-      for (i <- 0 to columnNames.length - 2) {
-        val columnName = columnNames(i)
-        val value = row.getInt(i)
-
-        scheme = scheme.replaceAll(columnName, value.toString)
-      }
-
-      BlockingSchemeCalculator.calculate(scheme) && humanOracle == "M"
-    }
-
-    val schemeSatisfyRows = trainingSet.filter { row =>
-      var scheme = optimalScheme
-
-      for (i <- 0 to columnNames.length - 2) {
-        val columnName = columnNames(i)
-        val value = row.getInt(i)
-
-        scheme = scheme.replaceAll(columnName, value.toString)
-      }
-
-      BlockingSchemeCalculator.calculate(scheme)
-    }
-
-    return satisfyingRows.count().toFloat/schemeSatisfyRows.count().toFloat
-  }
-
-  def fMeasure(pairCompleteness: Float, pairQuality: Float): Float = {
-    return (2 * pairCompleteness * pairQuality)/(pairQuality + pairCompleteness)
-  }
-
+  /** Calculates false positives given a training set dataframe and a blocking scheme.
+    *
+    *  @param spark the spark session object.
+    *  @param scheme blocking scheme.
+    *  @param trainingSet training set dataframe.
+    */
   def falsePositives(spark: SparkSession, scheme: String, trainingSet: DataFrame): Long = {
 
     val count = spark.sparkContext.longAccumulator
@@ -309,9 +230,6 @@ object Algorithm {
         currentScheme = currentScheme.replaceAll(columnName, value.toString)
       }
 
-      currentScheme = currentScheme.replaceAll(" and ", "&")
-      currentScheme = currentScheme.replaceAll(" or ", "|")
-
       val result = BlockingSchemeCalculator.calculate(currentScheme)
 
       if (result && humanOracle == "N") {
@@ -322,6 +240,12 @@ object Algorithm {
     return count.value
   }
 
+  /** Calculates false negatives given a training set dataframe and a blocking scheme.
+    *
+    *  @param spark the spark session object.
+    *  @param scheme blocking scheme.
+    *  @param trainingSet training set dataframe.
+    */
   def falseNegatives(spark: SparkSession, scheme: String, trainingSet: DataFrame): Long = {
 
     val count = spark.sparkContext.longAccumulator
@@ -338,9 +262,6 @@ object Algorithm {
         currentScheme = currentScheme.replaceAll(columnName, value.toString)
       }
 
-      currentScheme = currentScheme.replaceAll(" and ", "&")
-      currentScheme = currentScheme.replaceAll(" or ", "|")
-
       val result = BlockingSchemeCalculator.calculate(currentScheme)
 
       if (!result && humanOracle == "M") {
@@ -351,6 +272,12 @@ object Algorithm {
     return count.value
   }
 
+  /** Calculates true positives given a training set dataframe and a blocking scheme.
+    *
+    *  @param spark the spark session object.
+    *  @param scheme blocking scheme.
+    *  @param trainingSet training set dataframe.
+    */
   def truePositives(spark: SparkSession, scheme: String, trainingSet: DataFrame): Long = {
 
     val count = spark.sparkContext.longAccumulator
@@ -367,9 +294,6 @@ object Algorithm {
         currentScheme = currentScheme.replaceAll(columnName, value.toString)
       }
 
-      currentScheme = currentScheme.replaceAll(" and ", "&")
-      currentScheme = currentScheme.replaceAll(" or ", "|")
-
       val result = BlockingSchemeCalculator.calculate(currentScheme)
 
       if (result && humanOracle == "M") {
@@ -380,7 +304,13 @@ object Algorithm {
     return count.value
   }
 
-  def humanOracle(spark: SparkSession, sampleFeatureVectors: DataFrame): DataFrame = {
+  /** Human oracle that labels the feature vectors based on a threshold percentage.
+    *
+    *  @param spark the spark session object.
+    *  @param sampleFeatureVectors sample feature vectors to label.
+    *  @param thresholdPercentage threshold percentage used by human oracle to decide if its a match or not.
+    */
+  def humanOracle(spark: SparkSession, sampleFeatureVectors: DataFrame, thresholdPercentage: Float): DataFrame = {
 
     val newSample = sampleFeatureVectors.withColumn("Label", lit("M"))
 
@@ -401,7 +331,7 @@ object Algorithm {
       val totalFeatures = row.length - 1
       val percentage: Float = (numberOf1.toFloat/totalFeatures.toFloat) * 100
       var result = "N"
-      if (percentage >= 100) {
+      if (percentage >= thresholdPercentage) {
         result = "M"
       }
 
@@ -413,76 +343,96 @@ object Algorithm {
     spark.createDataFrame(rdd, newSample.schema)
   }
 
+  /** Generates feature vectors given a dataset.
+    *
+    *  @param spark the spark session object.
+    *  @param dataframe dataset for which feature vectors are generated.
+    */
   def generateFeatureVectors(spark: SparkSession, dataframe: DataFrame): DataFrame = {
 
-    import spark.implicits._
+    // Ignore first column because it is considered to be a primary key column.
+    // Use only string datatype columns because soundex supports only string comparisons.
 
-    var featureVectors: Vector[FeatureVector] = Vector()
-    val count = dataframe.count().intValue()
+    val stringColumns = dataframe.dtypes
+      .slice(1, dataframe.dtypes.length)
+      .filter { col =>
+      col._2 == "StringType"
+    }.map { col => dataframe.col(col._1) }
 
-    for (x <- 0 to count) {
-      val xIndex = x+1
-      val xRecord = dataframe.filter(($"Record" === s"r${xIndex}"))
+    val df = dataframe.select(stringColumns: _*)
+    var featureVectors: Seq[Row] = Seq()
+    val rddWithIndex = df.rdd.zipWithIndex()
 
-      if (xRecord.isEmpty == false) {
+    rddWithIndex.collect().foreach { value =>
+      val xRecord = value._1
+      val xIndex = value._2
 
-        val xAuthor = xRecord.first().get(1).asInstanceOf[String]
-        val xTitle = xRecord.first().get(2).asInstanceOf[String]
-        val xVenue = xRecord.first().get(3).asInstanceOf[String]
-        val xRating = xRecord.first().get(4).asInstanceOf[String]
+      var xFeatures: List[String] = List()
 
-        for (y <- 0 to count) {
-          val yIndex = y + 1
+      for (i <- 0 to xRecord.length - 1) {
+        val feature = xRecord.getString(i)
+        xFeatures = xFeatures :+ feature
+      }
 
-          val yRecord = dataframe.filter(($"Record" === s"r${yIndex}"))
+      rddWithIndex.filter { v => v._2 > xIndex }
+        .collect()
+        .foreach { value =>
 
-          if (yRecord.isEmpty == false && y > x) {
-            val yAuthor = yRecord.first().get(1).asInstanceOf[String]
-            val yTitle = yRecord.first().get(2).asInstanceOf[String]
-            val yVenue = yRecord.first().get(3).asInstanceOf[String]
-            val yRating = yRecord.first().get(4).asInstanceOf[String]
+          val yRecord = value._1
+          val  yIndex = value._2
+          var soundexResult: Seq[Int] = Seq()
 
-            val authorFeature = RefinedSoundexMetric.compare(xAuthor, yAuthor).getOrElse(false)
-            val titleFeature = RefinedSoundexMetric.compare(xTitle, yTitle).getOrElse(false)
-            val venueFeature = RefinedSoundexMetric.compare(xVenue, yVenue).getOrElse(false)
-            val ratingFeature = RefinedSoundexMetric.compare(xRating, yRating).getOrElse(false)
+          var yFeatures: List[String] = List()
 
-            var aF = 0
-            var tF = 0
-            var vF = 0
-            var rF = 0
-
-            if (authorFeature) {
-              aF = 1
-            }
-            if (titleFeature) {
-              tF = 1
-            }
-            if (venueFeature) {
-              vF = 1
-            }
-            if (ratingFeature) {
-              rF = 1
-            }
-
-            val featureVector = FeatureVector(s"r${xIndex},r${yIndex}", aF, tF, vF, rF)
-            featureVectors = featureVectors :+ featureVector
+          for (i <- 0 to yRecord.length - 1) {
+            val feature = yRecord.getString(i)
+            yFeatures = yFeatures :+ feature
           }
-        }
+
+          for (i <- 0 to xFeatures.length - 1) {
+            val xFeature = xFeatures(i)
+            val yFeature = yFeatures(i)
+
+            val soundex = RefinedSoundexMetric.compare(xFeature, yFeature).getOrElse(false)
+
+            if (soundex) {
+              soundexResult = soundexResult :+ 1
+            } else {
+              soundexResult = soundexResult :+ 0
+            }
+          }
+
+          featureVectors = featureVectors :+ Row.fromSeq(soundexResult)
       }
     }
 
-    val columnNames = Seq("Author", "Title", "Venue", "Review")
-    val featureVectorWithoutTupleColumn = featureVectors.toDF().select(columnNames.head, columnNames.tail: _*)
+    val featureVectorsRdd = spark.sparkContext.parallelize(featureVectors)
 
-    return featureVectorWithoutTupleColumn.toDF()
+    var schema = new StructType()
+    df.schema.foreach { s =>
+      schema = schema.add(s.name, IntegerType)
+    }
+
+    val featureVectorsDf = spark.createDataFrame(featureVectorsRdd, schema)
+
+    return featureVectorsDf
   }
 
-  def randomSample(dataFrame: DataFrame, size: Int): DataFrame = {
-    val sample = dataFrame.sample(false, 1D*size/dataFrame.count)
+  /** Generates a random sample without replacement of a dataframe (Feature vectors in our case).
+    *
+    *  @param dataframe the feature vectors dataframe object.
+    *  @param size size of the sample generated.
+    */
+  def randomSample(dataframe: DataFrame, size: Int): DataFrame = {
+    val sample = dataframe.sample(false, 1D*size/dataframe.count)
     return sample
   }
 
+  /** Calculates gamma using a formula given in the algorithm.
+    *
+    *  @param sample the feature vectors sample for which gamma is to be calculated.
+    *  @param blockingScheme Blocking scheme used for feature vectors against which gamma is calculated.
+    */
   def calculateGamma(sample: DataFrame, blockingScheme: String): Float = {
 
     val columnNames = sample.columns
@@ -505,6 +455,14 @@ object Algorithm {
     return gamma
   }
 
+  /** Adds new similar or dissimilar rows based on gamma to create a balanced training feature vectors set.
+    *
+    *  @param sampleFeatureVectors sample of feature vectors.
+    *  @param featureVectorsExceptSample complete set of feature vectors except the current sample.
+    *  @param blockingScheme blocking scheme used.
+    *  @param deficiency number of rows needed to create the balanced training set.
+    *  @param similar indicates whether similar or dissimilar samples are needed to create a balanced training set.
+    */
   def addSample(sampleFeatureVectors: DataFrame,
                 featureVectorsExceptSample: DataFrame,
                 blockingScheme: String,
@@ -536,6 +494,12 @@ object Algorithm {
     return sampleFeatureVectors.union(newRows)
   }
 
+  /** Generates new blocking schemes given a optimum scheme, set of schemes and a condition(and or or) .
+    *
+    *  @param schemes set of blocking schemes.
+    *  @param optimumScheme optimum blocking scheme.
+    *  @param condition "and" or "or" condition to be used to create new schemes.
+    */
   def generateBlockingSchemes(schemes: Array[String],
                               optimumScheme: String,
                               condition: String): Array[String] = {
@@ -551,16 +515,14 @@ object Algorithm {
     return newSchemes
   }
 
-//  case class Config(in: String = "")
-//
-//  val parser = new scopt.OptionParser[Config]("Spark CSV Reader") {
-//
-//    head("Spark CSV Reader")
-//
-//    opt[String]('i', "input").required().valueName("<path>").
-//      action((x, c) => c.copy(in = x)).
-//      text("path to file that contains the data (in N-Triples format)")
-//
-//    help("help").text("prints this usage text")
-//  }
+  case class Config(in: String = "")
+
+  val parser = new scopt.OptionParser[Config]("Active Blocking Scheme Learning For Entity Resolution") {
+
+    head("Active Blocking Scheme Learning For Entity Resolution")
+
+    opt[String]('i', "input").required().valueName("<path>").
+      action((x, c) => c.copy(in = x)).
+      text("path to file that contains the data (in CSV format).")
+  }
 }
